@@ -1,0 +1,36 @@
+name: pdf_text_editor
+description: "PDF 文字修改工具:打开 PDF,点击文字直接修改并导出新文件(Windows / Android)。"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.14.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  material_ui: ^1.1.0
+  cupertino_icons: ^1.0.8
+  pdfrx: ^3.1.0
+  pdfium_dart: ^0.4.4
+  ffi: ^2.2.0
+  file_picker: ^13.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/fonts/
+
+  fonts:
+    - family: NotoSansSC
+      fonts:
+        - asset: assets/fonts/NotoSansSC-Regular.ttf
+        - asset: assets/fonts/NotoSansSC-Bold.ttf
+          weight: 700
