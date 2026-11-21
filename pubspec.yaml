@@ -2,7 +2,7 @@ name: pdf_text_editor
 description: "PDF 文字修改工具:打开 PDF,点击文字直接修改并导出新文件(Windows / Android)。"
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: ^3.14.0
@@ -16,6 +16,7 @@ dependencies:
   pdfium_dart: ^0.4.4
   ffi: ^2.2.0
   file_picker: ^13.4.0
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:

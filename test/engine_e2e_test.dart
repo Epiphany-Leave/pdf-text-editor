@@ -27,12 +27,11 @@ void main() {
   late pi.PDFium pdfium;
   setUpAll(() {
     pdfium = pi.getPdfium();
+    initPdfiumForEditing(); // same as app startup: single process-wide init
   });
 
   test('replace and delete text runs, verify by re-extraction', () async {
     final (fixture, runs) = withPdfium(pdfium, () => buildFixture(pdfium, font));
-    // ignore: avoid_print
-    print('T: fixture ${fixture.length} bytes, boxes: \${runs.map((r) => r.box)}');
     expect(runs.map((r) => r.text).toList(), ['原始文字', '编号:12345']);
 
     // ignore: avoid_print

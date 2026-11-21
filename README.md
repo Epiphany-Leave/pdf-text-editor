@@ -17,10 +17,25 @@
 
 ## 已知限制
 
-- 替换文字的字体是内置思源黑体,与原文字体外观可能不完全一致(原 PDF 字体是子集嵌入,无法复用;位置和字号保持一致)
+- 替换文字的字体是内置思源黑体(GB2312 常用字子集,两字重各约 2.3MB),与原文字体外观可能不完全一致;生僻字(子集外)在编辑时会提示,导出后可能显示为空白
 - 被盖白的原文字仍可能被"复制文本"操作选中(视觉与打印正确,这是该类方案的通行行为)
 - 旋转页面、OCR 扫描件编辑暂不支持
-- 导出文件因内嵌完整中文字体约增大 6~10 MB
+- 导出文件因内嵌中文字体约增大 2~3 MB
+
+## 错误排查
+
+首页有"错误日志"入口:应用启动、打开文件、导出的关键节点和所有未捕获异常都记录在应用数据目录 `error_log.txt`(可复制)。导出闪退这类原生层错误无法被 Dart 捕获,但可以结合日志定位到发生在哪一步。
+
+体积说明(arm64 包约 28MB):Flutter 运行时 ≈11MB、PDFium 引擎 ≈7MB、Dart 代码 ≈6MB、两字重字体 ≈4.5MB。只发 `--target-platform android-arm64` 的包;老式 32 位手机需另打 armeabi-v7a 包。
+
+## 字体子集重建
+
+```bash
+pip install fonttools
+# 生成 GB2312+ASCII+全角字符集后:
+pyftsubset 原字体.ttf --text-file=charset.txt --no-hinting --output-file=assets/fonts/NotoSansSC-Regular.ttf
+# lib/engine/font_charset.dart 需同步重新生成(编辑时的生僻字提示用)
+```
 
 ## 开发
 
@@ -33,8 +48,8 @@ flutter run         # 需连接设备或模拟器
 ### 构建
 
 ```bash
-flutter build apk --split-per-abi --release   # Android,arm64 包约 37MB
-flutter build windows --release               # Windows,需在 Windows 机器上构建
+flutter build apk --target-platform android-arm64 --release  # 约 28MB
+flutter build windows --release                               # Windows,需在 Windows 机器上构建
 ```
 
 本机(Linux)首次构建需注意:

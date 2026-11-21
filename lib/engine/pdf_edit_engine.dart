@@ -10,7 +10,7 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:pdfium_dart/pdfium_dart.dart' as pi;
-import 'package:pdfrx/pdfrx.dart' show PdfRect;
+import 'package:pdfrx/pdfrx.dart' show PdfRect, Pdfrx;
 
 import 'pdfium_extra.dart' as x;
 
@@ -31,26 +31,51 @@ class RunEdit {
   final bool bold;
 }
 
-/// Call before any direct PDFium use: initializes the library once per
-/// process and holds the process-wide gate while [work] runs, so concurrent
-/// PDFium users (the viewer) are serialized. Falls back to running without
-/// the gate where the gate asset is not resolvable.
+/// MUST run at app startup, before any pdfrx viewer loads a document:
+/// claims the process-wide PDFium gate and performs the single
+/// FPDF_InitLibrary for the whole process. The viewer then sees the gate
+/// claimed and skips its own init; without this, initializing PDFium twice
+/// from two threads segfaults (the Android export crash).
+void initPdfiumForEditing() {
+  Pdfrx.useProcessWidePdfiumGate = true;
+  try {
+    final pdfium = pi.getPdfium();
+    pi.PdfiumProcessGate.enable();
+    pi.PdfiumProcessGate.acquire();
+    try {
+      if (pi.PdfiumProcessGate.claimInit()) {
+        pdfium.FPDF_InitLibrary();
+      }
+    } finally {
+      pi.PdfiumProcessGate.release();
+    }
+  } catch (_) {
+    // Gate unavailable: pdfrx keeps ownership of FPDF_InitLibrary; the
+    // engine below never initializes, so no double-init can happen.
+  }
+}
+
+/// Holds the process-wide gate while [work] runs, serializing PDFium calls
+/// against the viewer's background worker. Never calls FPDF_InitLibrary.
+/// Best effort: if the gate cannot be resolved in this isolate, [work]
+/// still runs (the caller must ensure no concurrent rendering — see
+/// PdfViewerParams.isVisible in viewer_page.dart).
 T withPdfium<T>(pi.PDFium pdfium, T Function() work) {
   bool gated = false;
   try {
-    pi.PdfiumProcessGate.enable();
     pi.PdfiumProcessGate.acquire();
     gated = true;
-    if (pi.PdfiumProcessGate.claimInit()) {
-      pdfium.FPDF_InitLibrary();
-    }
-  } on ArgumentError {
+  } catch (_) {
     gated = false;
   }
   try {
     return work();
   } finally {
-    if (gated) pi.PdfiumProcessGate.release();
+    if (gated) {
+      try {
+        pi.PdfiumProcessGate.release();
+      } catch (_) {}
+    }
   }
 }
 
