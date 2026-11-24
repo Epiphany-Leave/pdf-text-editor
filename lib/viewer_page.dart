@@ -1,27 +1,40 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'edit_session.dart';
-import 'engine/font_charset.dart';
-import 'engine/pdf_edit_engine.dart';
+import 'engine/pdf_edit_engine.dart' show MissingPdfFont;
 import 'engine/runs.dart';
 import 'error_log.dart';
+import 'pdf_fonts.dart';
 
 class ViewerPage extends StatefulWidget {
-  const ViewerPage({super.key, required this.session, required this.filePath});
+  const ViewerPage({
+    super.key,
+    required this.session,
+    required this.filePath,
+    required this.fonts,
+  });
 
   final EditSession session;
   final String filePath;
+  final PdfFonts fonts;
 
   @override
   State<ViewerPage> createState() => _ViewerPageState();
 }
 
+enum _FontAction { importFile, preview }
+
 class _ViewerPageState extends State<ViewerPage> {
   bool _exporting = false;
+  bool _updating = false;
+  final _viewerController = PdfViewerController();
+  Matrix4? _savedView;
+  int _savedPage = 1;
 
   String get _fileName => widget.filePath.split(Platform.pathSeparator).last;
 
@@ -32,16 +45,17 @@ class _ViewerPageState extends State<ViewerPage> {
   }
 
   void _onEmptyTap() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('此页没有可编辑的文字(可能是扫描件图片页)')),
-    );
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('此页没有可编辑的文字(可能是扫描件图片页)')));
   }
 
   Future<void> _showEditSheet(TextRun run) async {
     final session = widget.session;
     final existing = session.editForRun(run);
-    final controller = TextEditingController(text: existing?.newText ?? run.text);
-    var bold = existing?.bold ?? false;
+    final controller = TextEditingController(
+      text: existing?.newText ?? run.text,
+    );
+    var bold = existing?.bold ?? run.format.bold;
     final result = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
@@ -57,7 +71,10 @@ class _ViewerPageState extends State<ViewerPage> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('第 ${run.page} 页原文:', style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
+              Text(
+                '第 ${run.page} 页原文:',
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+              ),
               const SizedBox(height: 4),
               Text(run.text, style: const TextStyle(fontSize: 16)),
               const Divider(height: 24),
@@ -70,25 +87,6 @@ class _ViewerPageState extends State<ViewerPage> {
                   labelText: '改为',
                   border: OutlineInputBorder(),
                 ),
-              ),
-              ValueListenableBuilder(
-                valueListenable: controller,
-                builder: (context, value, _) {
-                  final uncovered = value.text.runes
-                      .where((r) => !fontCovers(String.fromCharCode(r)))
-                      .map(String.fromCharCode)
-                      .toSet()
-                      .take(8)
-                      .join();
-                  if (uncovered.isEmpty) return const SizedBox.shrink();
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(
-                      '提示:内置字体不包含 $uncovered 等字,导出后这些字可能显示为空白',
-                      style: const TextStyle(color: Colors.orange, fontSize: 13),
-                    ),
-                  );
-                },
               ),
               const SizedBox(height: 8),
               SwitchListTile(
@@ -110,8 +108,7 @@ class _ViewerPageState extends State<ViewerPage> {
                     const SizedBox(width: 12),
                     OutlinedButton(
                       onPressed: () {
-                        session.removeEdit(existing);
-                        Navigator.pop(context);
+                        Navigator.pop(context, false);
                       },
                       child: const Text('清除修改'),
                     ),
@@ -128,8 +125,190 @@ class _ViewerPageState extends State<ViewerPage> {
         ),
       ),
     );
+    if (!mounted) return;
     if (result == true) {
-      session.upsertEdit(run, controller.text, bold: bold);
+      await _applyChange(() => _editWithFonts(run, controller.text, bold));
+    } else if (result == false && existing != null) {
+      await _applyChange(() => session.removeEdit(existing));
+    }
+  }
+
+  Future<void> _editWithFonts(TextRun run, String text, bool bold) async {
+    final session = widget.session;
+    final fonts = widget.fonts;
+    ({String name, Uint8List bytes})? substitute;
+    retry:
+    while (mounted) {
+      try {
+        final candidate = substitute;
+        await session.upsertEdit(
+          run,
+          text,
+          bold: bold,
+          substituteFont: candidate?.bytes,
+          confirmPreview: candidate == null
+              ? null
+              : (bytes, box) =>
+                    _confirmSubstitute(bytes, run.page, box, candidate.name),
+        );
+        return;
+      } on MissingPdfFont catch (missing) {
+        if (!mounted) return;
+        final canSubstitute = missing.runKey == run.key && substitute == null;
+        var action = await _chooseFont(missing, canSubstitute: canSubstitute);
+        while (mounted && action == _FontAction.importFile) {
+          final picked = await FilePicker.pickFiles();
+          final path = picked.firstOrNull?.path;
+          if (!mounted) return;
+          if (path != null && await fonts.importForEdit(File(path), missing)) {
+            continue retry;
+          }
+          if (!mounted) return;
+          action = await _chooseFont(
+            missing,
+            canSubstitute: canSubstitute,
+            importFailed: path != null,
+          );
+        }
+        if (!mounted || action != _FontAction.preview) return;
+
+        substitute = await fonts.substituteFor(missing);
+        if (substitute == null) {
+          throw StateError('可用的近似字体也缺少这些字，请导入同款完整字体。');
+        }
+      }
+    }
+  }
+
+  Future<_FontAction?> _chooseFont(
+    MissingPdfFont missing, {
+    required bool canSubstitute,
+    bool importFailed = false,
+  }) => showDialog<_FontAction>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('需要字体'),
+      content: Text(
+        importFailed
+            ? '所选文件无法提供这次修改需要的“${missing.fontName}”。请选择包含这些字的同款 TrueType 字体（.ttf 或 .ttc）。'
+            : canSubstitute
+            ? '“${missing.fontName}”无法写入新文字。你可以导入同款字体，或先预览近似字体。'
+            : '需要“${missing.fontName}”才能保留该段文字的原格式。请导入同款字体。',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, _FontAction.importFile),
+          child: const Text('导入同款字体'),
+        ),
+        if (canSubstitute)
+          FilledButton(
+            onPressed: () => Navigator.pop(context, _FontAction.preview),
+            child: const Text('预览近似字体'),
+          ),
+      ],
+    ),
+  );
+
+  Future<bool> _confirmSubstitute(
+    Uint8List bytes,
+    int page,
+    PdfRect? box,
+    String name,
+  ) async {
+    if (!mounted) return false;
+    final sourceName = '${widget.filePath}#font-preview';
+    final reference = PdfDocumentRefData(
+      bytes,
+      sourceName: sourceName,
+      key: PdfDocumentRefKey(sourceName, [Object()]),
+    );
+    final controller = PdfViewerController();
+    var positioning = false;
+    var positioned = false;
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => StatefulBuilder(
+            builder: (context, setDialogState) => AlertDialog(
+              title: Text('预览 $name'),
+              content: SizedBox(
+                width: 400,
+                height: (MediaQuery.sizeOf(context).height * 0.42)
+                    .clamp(120.0, 300.0)
+                    .toDouble(),
+                child: PdfViewer(
+                  reference,
+                  controller: controller,
+                  initialPageNumber: page,
+                  params: PdfViewerParams(
+                    onViewerReady: (_, viewer) async {
+                      if (positioning || !context.mounted) return;
+                      positioning = true;
+                      if (box != null && box.isNotEmpty) {
+                        final padding = box.height * 3;
+                        await viewer.goToRectInsidePage(
+                          pageNumber: page,
+                          rect: PdfRect(
+                            box.left - padding,
+                            box.top + padding,
+                            box.right + padding,
+                            box.bottom - padding,
+                          ),
+                          duration: Duration.zero,
+                        );
+                      }
+                      if (context.mounted) {
+                        setDialogState(() => positioned = true);
+                      }
+                    },
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('取消'),
+                ),
+                ValueListenableBuilder(
+                  valueListenable: controller.visibleRenderState,
+                  builder: (context, state, _) => FilledButton(
+                    onPressed:
+                        positioned && state == PdfVisibleRenderState.ready
+                        ? () => Navigator.pop(context, true)
+                        : null,
+                    child: const Text('使用此字体'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ) ??
+        false;
+  }
+
+  Future<bool> _applyChange(Future<void> Function() change) async {
+    if (_updating || _exporting) return false;
+    if (_viewerController.isReady) {
+      _savedView = _viewerController.value.clone();
+      _savedPage = _viewerController.pageNumber ?? 1;
+    }
+    setState(() => _updating = true);
+    try {
+      await change();
+      return true;
+    } catch (e, s) {
+      _savedView = null;
+      ErrorLog.log('修改失败: $e', s);
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('修改失败: $e')));
+      }
+      return false;
+    } finally {
+      if (mounted) setState(() => _updating = false);
     }
   }
 
@@ -140,19 +319,26 @@ class _ViewerPageState extends State<ViewerPage> {
       builder: (context) => SafeArea(
         child: ListView(
           children: [
-            const ListTile(title: Text('修改记录', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+            const ListTile(
+              title: Text(
+                '修改记录',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+            ),
             for (final e in session.edits)
               ListTile(
                 leading: CircleAvatar(child: Text(e.runKey.split(':').first)),
-                title: Text('${e.originalText} → ${e.newText.trim().isEmpty ? '(删除)' : e.newText}',
-                    maxLines: 2, overflow: TextOverflow.ellipsis),
+                title: Text(
+                  '${e.originalText} → ${e.newText.trim().isEmpty ? '(删除)' : e.newText}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
                 trailing: IconButton(
                   icon: const Icon(Icons.undo),
                   tooltip: '撤销',
-                  onPressed: () {
-                    session.removeEdit(e);
+                  onPressed: () async {
                     Navigator.pop(context);
-                    _showChanges();
+                    await _applyChange(() => session.removeEdit(e));
                   },
                 ),
               ),
@@ -165,24 +351,19 @@ class _ViewerPageState extends State<ViewerPage> {
   Future<void> _export() async {
     final session = widget.session;
     if (!session.hasEdits) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('还没有修改内容。先点击文档中的文字进行修改。')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('还没有修改内容。先点击文档中的文字进行修改。')));
       return;
     }
     setState(() => _exporting = true);
     ErrorLog.log('导出开始:${session.editCount} 处修改');
     try {
-      // 暂停查看器渲染(isVisible=false 会取消未完成渲染并释放页面图像),
-      // 等待在迹任务排空,确保导出期间 PDFium 只有一个使用者。
-      await Future<void>.delayed(const Duration(milliseconds: 600));
-      final bytes = await PdfEditEngine.applyEdits(
-        source: session.sourceBytes,
-        fontRegular: session.fontRegular!,
-        fontBold: session.fontBold!,
-        pages: session.toPageEdits(),
+      final bytes = session.previewBytes;
+      final base = _fileName.replaceAll(
+        RegExp(r'\.pdf$', caseSensitive: false),
+        '',
       );
-      final base = _fileName.replaceAll(RegExp(r'\.pdf$', caseSensitive: false), '');
       final suggestion = '$base-已修改.pdf';
       // file_picker 13 的 saveFile 直接收字节并负责写盘(安卓走系统保存界面)
       final uri = await FilePicker.saveFile(fileName: suggestion, bytes: bytes);
@@ -192,14 +373,14 @@ class _ViewerPageState extends State<ViewerPage> {
       }
       ErrorLog.log('导出成功: $uri (${bytes.length ~/ 1024}KB)');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已导出')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('已导出')));
       }
     } catch (e, s) {
       ErrorLog.log('导出失败: $e', s);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出失败:$e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('导出失败:$e')));
       }
     } finally {
       if (mounted) setState(() => _exporting = false);
@@ -234,39 +415,58 @@ class _ViewerPageState extends State<ViewerPage> {
               ),
             ],
           ),
-          body: _exporting
-              ? const Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 16),
-                      Text('正在导出,大约需要几秒…'),
-                    ],
-                  ),
-                )
-              : PdfViewer(
-                  PdfDocumentRefFile(widget.filePath),
-                  params: PdfViewerParams(
-              pageOverlaysBuilder: (context, pageRect, page) {
-                return [
-                  Positioned.fill(
-                    child: _PageOverlay(
-                      session: session,
-                      page: page,
-                      onTap: _showEditSheet,
-                      onEmptyTap: _onEmptyTap,
+          body: ListenableBuilder(
+            listenable: session,
+            builder: (context, _) => PdfViewer(
+              PdfDocumentRefData(
+                session.previewBytes,
+                sourceName:
+                    '${widget.filePath}#${session.id}:${session.previewRevision}',
+              ),
+              controller: _viewerController,
+              initialPageNumber: _savedPage,
+              params: PdfViewerParams(
+                onViewerReady: (document, controller) {
+                  final saved = _savedView;
+                  if (saved != null) {
+                    controller.value = saved;
+                    _savedView = null;
+                  }
+                },
+                pageOverlaysBuilder: (context, pageRect, page) {
+                  return [
+                    Positioned.fill(
+                      child: _PageOverlay(
+                        session: session,
+                        page: page,
+                        onTap: _showEditSheet,
+                        onEmptyTap: _onEmptyTap,
+                      ),
                     ),
-                  ),
-                ];
-              },
+                  ];
+                },
+              ),
             ),
           ),
         ),
-        if (_exporting)
+        if (_exporting || _updating)
           const ModalBarrier(color: Colors.black54, dismissible: false),
-        if (_exporting)
-          const Center(child: Card(child: Padding(padding: EdgeInsets.all(24), child: CircularProgressIndicator()))),
+        if (_exporting || _updating)
+          Center(
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: 12),
+                    Text(_updating ? '正在更新预览…' : '正在导出…'),
+                  ],
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -274,7 +474,12 @@ class _ViewerPageState extends State<ViewerPage> {
 
 /// One page's transparent overlay: registers taps and previews edits.
 class _PageOverlay extends StatefulWidget {
-  const _PageOverlay({required this.session, required this.page, required this.onTap, required this.onEmptyTap});
+  const _PageOverlay({
+    required this.session,
+    required this.page,
+    required this.onTap,
+    required this.onEmptyTap,
+  });
 
   final EditSession session;
   final PdfPage page;
@@ -291,9 +496,18 @@ class _PageOverlayState extends State<_PageOverlay> {
   @override
   void initState() {
     super.initState();
-    widget.session.runsForPage(widget.page).then((r) {
-      if (mounted) setState(() => _runs = r);
-    });
+    widget.session
+        .runsForPage(widget.page.pageNumber)
+        .then((r) {
+          if (mounted) setState(() => _runs = r);
+        })
+        .catchError((Object e, StackTrace s) {
+          ErrorLog.log('读取原文字格式失败: $e', s);
+          if (mounted) {
+            ScaffoldMessenger.of(context)
+                .showSnackBar(SnackBar(content: Text('读取文字格式失败: $e')));
+          }
+        });
   }
 
   @override
@@ -304,13 +518,27 @@ class _PageOverlayState extends State<_PageOverlay> {
         final box = context.findRenderObject() as RenderBox?;
         if (runs == null || box == null || !box.size.isFinite) return false;
         final scale = box.size.width / widget.page.width;
-        final pdfX = details.localPosition.dx / scale;
-        final pdfY = widget.page.height - details.localPosition.dy / scale;
+        final point = PdfPoint(
+          details.localPosition.dx / scale,
+          widget.page.height - details.localPosition.dy / scale,
+        );
+        TextRun? closest;
+        var closestDistance = double.infinity;
         for (final run in runs) {
-          if (run.containsPoint(pdfX, pdfY)) {
-            widget.onTap(run);
-            return true;
+          final bounds = widget.session.previewBoxForRun(run);
+          if (bounds.isEmpty || !bounds.containsPoint(point, margin: 3)) {
+            continue;
           }
+          final distance = bounds.distanceSquaredTo(point);
+          if (distance < closestDistance) {
+            closest = run;
+            closestDistance = distance;
+            if (distance == 0) break;
+          }
+        }
+        if (closest != null) {
+          widget.onTap(closest);
+          return true;
         }
         if (runs.isEmpty) widget.onEmptyTap();
         return false;
@@ -327,6 +555,7 @@ class _PageOverlayState extends State<_PageOverlay> {
                 pageNumber: widget.page.pageNumber,
                 pageHeight: widget.page.height,
                 scale: constraints.biggest.width / widget.page.width,
+                revision: widget.session.previewRevision,
               ),
               child: const SizedBox.expand(),
             ),
@@ -338,64 +567,45 @@ class _PageOverlayState extends State<_PageOverlay> {
 }
 
 class _EditsPainter extends CustomPainter {
-  _EditsPainter({required this.session, required this.pageNumber, required this.pageHeight, required this.scale});
+  _EditsPainter({
+    required this.session,
+    required this.pageNumber,
+    required this.pageHeight,
+    required this.scale,
+    required this.revision,
+  });
 
   final EditSession session;
   final int pageNumber;
   final double pageHeight; // in PDF points
   final double scale;
+  final int revision;
 
   @override
   void paint(Canvas canvas, Size size) {
     final edits = session.editsForPage(pageNumber);
     if (edits.isEmpty) return;
-    final white = Paint()..color = Colors.white;
     final border = Paint()
       ..color = Colors.blue.withValues(alpha: 0.7)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.0;
     for (final edit in edits) {
+      final box = session.previewBoxForRun(edit.run);
+      if (box.isEmpty) continue;
       final rect = Rect.fromLTRB(
-        edit.box.left * scale,
-        (pageHeight - edit.box.top) * scale,
-        edit.box.right * scale,
-        (pageHeight - edit.box.bottom) * scale,
+        box.left * scale,
+        (pageHeight - box.top) * scale,
+        box.right * scale,
+        (pageHeight - box.bottom) * scale,
       ).inflate(1.0 * scale);
-      canvas.drawRect(rect, white);
       canvas.drawRect(rect, border);
-      if (edit.newText.trim().isEmpty) continue;
-      // Match the run height: estimate from the original text height.
-      final fontSize = _estimateFontSize(edit) * scale;
-      final tp = TextPainter(
-        text: TextSpan(
-          text: edit.newText,
-          style: TextStyle(
-            fontFamily: 'NotoSansSC',
-            fontWeight: edit.bold ? FontWeight.w700 : FontWeight.w400,
-            fontSize: fontSize,
-            color: Colors.black,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      );
-      tp.layout();
-      canvas.translate(rect.left, rect.top + (rect.height - tp.height) / 2);
-      tp.paint(canvas, Offset.zero);
-      canvas.translate(-rect.left, -(rect.top + (rect.height - tp.height) / 2));
     }
-  }
-
-  double _estimateFontSize(RunEdit edit) {
-    final cjk = edit.newText.runes.any((r) => r >= 0x2E80 && r <= 0x9FFF);
-    final src = edit.originalText.runes.any((r) => r >= 0x2E80 && r <= 0x9FFF);
-    final h = edit.box.height;
-    return (cjk || src) ? h * 0.98 : h / 0.72;
   }
 
   @override
   bool shouldRepaint(_EditsPainter old) =>
       old.session != session ||
       old.pageNumber != pageNumber ||
-      old.session.editCount != session.editCount ||
+      old.revision != revision ||
       old.scale != scale;
 }

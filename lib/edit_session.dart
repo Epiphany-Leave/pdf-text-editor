@@ -1,89 +1,127 @@
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'engine/pdf_edit_engine.dart';
 import 'engine/runs.dart';
 
-/// All state of one editing session: the opened document, per-page text runs
-/// (loaded lazily) and the user's edits.
 class EditSession extends ChangeNotifier {
-  EditSession(this.document, this.sourceBytes);
-
+  EditSession(this.document, this.sourceBytes, {this.resolveFont})
+    : previewBytes = sourceBytes;
+  static int _nextId = 0;
+  final int id = _nextId++;
   final PdfDocument document;
-  final Uint8List sourceBytes; // original file bytes, used at export
-
+  final Uint8List sourceBytes;
+  final Future<Uint8List?> Function(MissingPdfFont)? resolveFont;
+  Uint8List previewBytes;
+  int previewRevision = 0;
   final Map<int, List<TextRun>> _runs = {};
-  final Map<String, RunEdit> _edits = {}; // keyed by run.key
-  Uint8List? fontRegular;
-  Uint8List? fontBold;
+  Map<String, RunEdit> _edits = {};
+  Map<String, PdfRect> _previewBoxes = const {};
+  Map<String, Uint8List> _matchingFonts = const {};
+  bool _disposed = false;
 
   bool get hasEdits => _edits.isNotEmpty;
   int get editCount => _edits.length;
   Iterable<RunEdit> get edits => _edits.values;
 
-  Future<void> loadFonts() async {
-    fontRegular ??= (await rootBundle.load('assets/fonts/NotoSansSC-Regular.ttf')).buffer.asUint8List();
-    fontBold ??= (await rootBundle.load('assets/fonts/NotoSansSC-Bold.ttf')).buffer.asUint8List();
-  }
-
-  Future<List<TextRun>> runsForPage(PdfPage page) async {
-    return _runs[page.pageNumber] ??= await _loadRuns(page);
-  }
-
-  static Future<List<TextRun>> _loadRuns(PdfPage page) async {
-    final text = await page.loadStructuredText(ensureLoaded: true);
-    final runs = <TextRun>[];
-    for (var i = 0; i < text.fragments.length; i++) {
-      final f = text.fragments[i];
-      runs.addAll(groupRuns(
-        page: page.pageNumber,
-        fragmentIndex: i,
-        text: f.text,
-        charRects: f.charRects,
-      ));
-    }
-    return runs;
-  }
+  Future<List<TextRun>> runsForPage(int pageNumber) async =>
+      _runs[pageNumber] ??= await PdfEditEngine.loadRuns(
+        source: sourceBytes,
+        pageNumber: pageNumber,
+      );
 
   List<RunEdit> editsForPage(int pageNumber) =>
-      _edits.values.where((e) => e.runKey.startsWith('$pageNumber:')).toList();
-
+      _edits.values.where((e) => e.run.page == pageNumber).toList();
   RunEdit? editForRun(TextRun run) => _edits[run.key];
+  PdfRect previewBoxForRun(TextRun run) => _previewBoxes[run.key] ?? run.box;
 
-  void upsertEdit(TextRun run, String newText, {bool bold = false}) {
-    if (newText == run.text && !bold) {
-      _edits.remove(run.key); // unchanged → no edit needed
+  Future<void> upsertEdit(
+    TextRun run,
+    String newText, {
+    bool? bold,
+    Uint8List? substituteFont,
+    Future<bool> Function(Uint8List, PdfRect?)? confirmPreview,
+  }) {
+    final next = Map<String, RunEdit>.of(_edits);
+    if (newText == run.text && (bold == null || bold == run.format.bold)) {
+      next.remove(run.key);
     } else {
-      _edits[run.key] = RunEdit(
-        runKey: run.key,
-        originalText: run.text,
+      next[run.key] = RunEdit(
+        run: run,
         newText: newText,
-        box: run.box,
         bold: bold,
+        substituteFont: substituteFont,
       );
     }
-    notifyListeners();
+    return _commit(
+      next,
+      confirmPreview: confirmPreview == null
+          ? null
+          : (preview) => confirmPreview(preview.bytes, preview.boxes[run.key]),
+    );
   }
 
-  void removeEdit(RunEdit edit) {
-    _edits.remove(edit.runKey);
-    notifyListeners();
+  Future<void> removeEdit(RunEdit edit) {
+    final next = Map<String, RunEdit>.of(_edits)..remove(edit.runKey);
+    return _commit(next);
   }
 
-  /// Edits grouped for the engine, in page order.
-  List<PageEdit> toPageEdits() {
+  Future<void> _commit(
+    Map<String, RunEdit> next, {
+    Future<bool> Function(({Uint8List bytes, Map<String, PdfRect> boxes}))?
+    confirmPreview,
+  }) async {
     final byPage = <int, List<RunEdit>>{};
-    for (final e in _edits.values) {
-      final page = int.parse(e.runKey.split(':').first);
-      byPage.putIfAbsent(page, () => []).add(e);
+    for (final edit in next.values) {
+      byPage.putIfAbsent(edit.run.page, () => []).add(edit);
     }
-    final keys = byPage.keys.toList()..sort();
-    return [for (final k in keys) PageEdit(pageNumber: k, edits: byPage[k]!)];
+    final pages = [
+      for (final page in byPage.keys.toList()..sort())
+        PageEdit(pageNumber: page, edits: byPage[page]!),
+    ];
+    final matchingFonts = next.isEmpty
+        ? <String, Uint8List>{}
+        : Map<String, Uint8List>.of(_matchingFonts);
+    final preview = await _render(pages, matchingFonts);
+    if (_disposed) return;
+    if (confirmPreview != null && !await confirmPreview(preview)) return;
+    if (_disposed) return;
+    // Publish the edit and its rendered document together. Export uses these bytes.
+    _edits = next;
+    _matchingFonts = matchingFonts;
+    previewBytes = preview.bytes;
+    _previewBoxes = preview.boxes;
+    previewRevision++;
+    notifyListeners();
+  }
+
+  Future<({Uint8List bytes, Map<String, PdfRect> boxes})> _render(
+    List<PageEdit> pages,
+    Map<String, Uint8List> matchingFonts,
+  ) async {
+    if (pages.isEmpty) {
+      return (bytes: sourceBytes, boxes: const <String, PdfRect>{});
+    }
+    final attempted = <String>{};
+    while (true) {
+      try {
+        return await PdfEditEngine.renderEdits(
+          source: sourceBytes,
+          pages: pages,
+          matchingFonts: matchingFonts,
+        );
+      } on MissingPdfFont catch (missing) {
+        if (_disposed || !attempted.add(missing.key)) rethrow;
+        final bytes = await resolveFont?.call(missing);
+        if (bytes == null || _disposed) rethrow;
+        matchingFonts[missing.key] = bytes;
+      }
+    }
   }
 
   @override
   void dispose() {
+    _disposed = true;
     document.dispose();
     super.dispose();
   }

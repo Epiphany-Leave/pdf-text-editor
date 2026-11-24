@@ -1,13 +1,14 @@
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'edit_session.dart';
 import 'engine/pdf_edit_engine.dart' show initPdfiumForEditing;
 import 'error_log.dart';
+import 'pdf_fonts.dart';
 import 'viewer_page.dart';
 
 void main() {
@@ -25,7 +26,10 @@ class PdfTextEditorApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'PDF 文字修改',
-      theme: ThemeData(colorSchemeSeed: Colors.blue, brightness: Brightness.light),
+      theme: ThemeData(
+        colorSchemeSeed: Colors.blue,
+        brightness: Brightness.light,
+      ),
       home: const HomePage(),
       debugShowCheckedModeBanner: false,
     );
@@ -47,19 +51,23 @@ class HomePage extends StatelessWidget {
       final doc = await PdfDocument.openFile(path);
       final bytes = await File(path).readAsBytes();
       if (!context.mounted) return;
-      final session = EditSession(doc, bytes);
-      await session.loadFonts();
-      ErrorLog.log('打开文件: $path (${bytes.length ~/ 1024}KB, ${doc.pages.length}页)');
+      final fonts = PdfFonts();
+      final session = EditSession(doc, bytes, resolveFont: fonts.findExact);
+      ErrorLog.log(
+        '打开文件: $path (${bytes.length ~/ 1024}KB, ${doc.pages.length}页)',
+      );
       if (!context.mounted) return;
       Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => ViewerPage(session: session, filePath: path)),
+        MaterialPageRoute(
+          builder: (_) =>
+              ViewerPage(session: session, filePath: path, fonts: fonts),
+        ),
       );
     } catch (e, s) {
       ErrorLog.log('打开文件失败: $e', s);
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('打开文件失败:$e')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('打开文件失败:$e')));
     }
   }
 
@@ -82,8 +90,10 @@ class HomePage extends StatelessWidget {
               onPressed: () => _openPdf(context),
             ),
             const SizedBox(height: 24),
-            Text('打开后点击文字即可修改,完成后导出新文件',
-                style: TextStyle(color: Colors.grey.shade600)),
+            Text(
+              '打开后点击文字即可修改,完成后导出新文件',
+              style: TextStyle(color: Colors.grey.shade600),
+            ),
             const SizedBox(height: 16),
             TextButton.icon(
               icon: const Icon(Icons.bug_report_outlined, size: 18),
@@ -111,15 +121,18 @@ class HomePage extends StatelessWidget {
             Row(
               children: [
                 const Expanded(
-                    child: Text('错误日志',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+                  child: Text(
+                    '错误日志',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
                 IconButton(
                   icon: const Icon(Icons.copy),
                   tooltip: '复制',
                   onPressed: () {
                     Clipboard.setData(ClipboardData(text: ErrorLog.asText));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('已复制到剪贴板')));
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(const SnackBar(content: Text('已复制到剪贴板')));
                   },
                 ),
               ],

@@ -1,25 +1,81 @@
-// Pure-Dart text run grouping: turns pdfrx text fragments (whole lines) into
-// small tappable runs (a number, a word, a short CJK phrase) so the user edits
-// exactly the piece they tapped.
 import 'package:pdfrx/pdfrx.dart' show PdfRect;
 
-/// A contiguous group of characters on one line, in PDF page coordinates
-/// (origin bottom-left, y up).
+/// Original PDF values, before viewer zoom.
+class PdfTextFormat {
+  const PdfTextFormat({
+    required this.fontName,
+    required this.familyName,
+    required this.fontSize,
+    this.fontId = 0,
+    this.color = 0xff000000,
+    this.weight = 400,
+    this.italic = false,
+    this.renderMode = 0,
+    this.strokeColor = 0xff000000,
+    this.strokeWidth = 0,
+    this.a = 1,
+    this.b = 0,
+    this.c = 0,
+    this.d = 1,
+  });
+  final String fontName, familyName;
+  final double fontSize;
+  final int fontId, color, weight, renderMode, strokeColor;
+  final bool italic;
+  final double strokeWidth, a, b, c, d;
+  bool get syntheticBold => renderMode == 2 && strokeWidth > 0;
+  bool get bold => weight >= 600 || syntheticBold;
+  bool sameAs(PdfTextFormat other) =>
+      fontId == other.fontId &&
+      fontName == other.fontName &&
+      fontSize == other.fontSize &&
+      color == other.color &&
+      weight == other.weight &&
+      italic == other.italic &&
+      renderMode == other.renderMode &&
+      strokeColor == other.strokeColor &&
+      strokeWidth == other.strokeWidth &&
+      a == other.a &&
+      b == other.b &&
+      c == other.c &&
+      d == other.d;
+}
+
+class PdfTextCharacter {
+  const PdfTextCharacter({
+    required this.index,
+    required this.text,
+    required this.box,
+    required this.format,
+    required this.x,
+    required this.y,
+    this.advanceRight,
+  });
+  final int index; // PDFium character index, not a UTF-16 string offset.
+  final String text;
+  final PdfRect box;
+  final PdfTextFormat format;
+  final double x, y;
+  final double? advanceRight;
+}
+
 class TextRun {
-  TextRun({
+  const TextRun({
     required this.page,
     required this.key,
     required this.text,
     required this.box,
-    required this.fontSize,
+    required this.format,
+    required this.sourceCharIndex,
+    required this.sourceEndIndex,
+    required this.x,
+    required this.y,
   });
-
-  final int page; // 1-based
-  final String key; // stable identity: page:fragment:start:end
-  final String text;
-  final PdfRect box; // union of char boxes, y-up
-  final double fontSize; // estimate for preview overlay
-
+  final int page, sourceCharIndex, sourceEndIndex;
+  final String key, text;
+  final PdfRect box;
+  final PdfTextFormat format;
+  final double x, y; // Original baseline origin in page coordinates.
   bool containsPoint(double x, double y, {double pad = 3}) =>
       x >= box.left - pad &&
       x <= box.right + pad &&
@@ -27,92 +83,78 @@ class TextRun {
       y <= box.top + pad;
 }
 
-const _cjkStart = 0x2E80;
+bool _isCjk(int r) =>
+    (r >= 0x2e80 && r <= 0x9fff) ||
+    (r >= 0xf900 && r <= 0xfaff) ||
+    (r >= 0x20000 && r <= 0x2fa1f);
 
-bool _isCJK(int r) =>
-    (r >= _cjkStart && r <= 0x9FFF) || // CJK blocks + kana
-    (r >= 0xF900 && r <= 0xFAFF) ||
-    (r >= 0x20000 && r <= 0x2FA1F);
-
-bool _isWhitespace(String ch) =>
-    ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\u00A0';
-
-/// Groups [charRects] (aligned with [text]) of one fragment into runs.
-/// Breaks at whitespace, line changes (y jump) and horizontal gaps larger
-/// than a fraction of the character height (table cells, wide word spacing).
+/// Format changes are editing boundaries, so neighboring fonts and colors survive.
 List<TextRun> groupRuns({
   required int page,
-  required int fragmentIndex,
-  required String text,
-  required List<PdfRect> charRects,
+  required List<PdfTextCharacter> characters,
 }) {
   final runs = <TextRun>[];
   var start = -1;
-  PdfRect? prevRect;
-
-  void close(int endExclusive) {
-    if (start < 0 || endExclusive <= start) return;
-    final slice = text.substring(start, endExclusive);
-    final boxes = charRects.sublist(start, endExclusive).where((r) => r.isNotEmpty).toList();
-    if (slice.trim().isEmpty || boxes.isEmpty) {
-      start = -1;
-      return;
+  PdfTextCharacter? previous;
+  var containsCjk = false;
+  void close(int end) {
+    if (start < 0) return;
+    final chars = characters.sublist(start, end), first = characters[start];
+    var left = first.box.left,
+        right = first.box.right,
+        top = first.box.top,
+        bottom = first.box.bottom;
+    for (final char in chars.skip(1)) {
+      if (char.box.left < left) left = char.box.left;
+      if (char.box.right > right) right = char.box.right;
+      if (char.box.top > top) top = char.box.top;
+      if (char.box.bottom < bottom) bottom = char.box.bottom;
     }
-    var left = boxes.first.left, top = boxes.first.top, right = boxes.first.right, bottom = boxes.first.bottom;
-    for (final b in boxes) {
-      left = b.left < left ? b.left : left;
-      top = b.top > top ? b.top : top;
-      right = b.right > right ? b.right : right;
-      bottom = b.bottom < bottom ? b.bottom : bottom;
-    }
-    runs.add(TextRun(
-      page: page,
-      key: '$page:$fragmentIndex:$start:$endExclusive',
-      text: slice,
-      box: PdfRect(left, top, right, bottom),
-      fontSize: estimateFontSize(slice, boxes),
-    ));
+    runs.add(
+      TextRun(
+        page: page,
+        key: '$page:${first.index}:${chars.last.index + 1}',
+        text: chars.map((c) => c.text).join(),
+        box: PdfRect(left, top, right, bottom),
+        format: first.format,
+        sourceCharIndex: first.index,
+        sourceEndIndex: chars.last.index + 1,
+        x: first.x,
+        y: first.y,
+      ),
+    );
     start = -1;
+    containsCjk = false;
   }
 
-  for (var i = 0; i < text.length; i++) {
-    final ch = text[i];
-    final rect = i < charRects.length ? charRects[i] : null;
-    if (_isWhitespace(ch) || rect == null || rect.isEmpty) {
+  for (var i = 0; i < characters.length; i++) {
+    final char = characters[i];
+    if (char.text.trim().isEmpty || char.box.isEmpty) {
       close(i);
-      prevRect = rect ?? prevRect;
+      previous = char;
       continue;
     }
-    if (prevRect != null && prevRect.isNotEmpty && start >= 0) {
-      final sameLine = (rect.top + rect.bottom - prevRect.top - prevRect.bottom).abs() <
-          rect.height * 0.6;
-      final gap = rect.left - prevRect.right;
-      final h = rect.height > prevRect.height ? rect.height : prevRect.height;
-      // CJK runs split tighter (cell boundaries), latin runs tolerate word spaces.
-      final gapLimit = h * (_hasCJK(text, start, i) ? 0.6 : 0.9);
-      if (!sameLine || gap > gapLimit) close(i);
+    if (start >= 0 && previous != null) {
+      final h = char.box.height > previous.box.height
+          ? char.box.height
+          : previous.box.height;
+      final sameLine =
+          (char.box.top +
+                  char.box.bottom -
+                  previous.box.top -
+                  previous.box.bottom)
+              .abs() <
+          h * 0.6;
+      if (!sameLine ||
+          char.box.left - previous.box.right > h * (containsCjk ? 0.6 : 0.9) ||
+          !char.format.sameAs(previous.format)) {
+        close(i);
+      }
     }
     if (start < 0) start = i;
-    prevRect = rect;
+    containsCjk = containsCjk || char.text.runes.any(_isCjk);
+    previous = char;
   }
-  close(text.length);
+  close(characters.length);
   return runs;
-}
-
-bool _hasCJK(String s, int from, int to) {
-  for (var i = from; i < to; i++) {
-    if (_isCJK(s.codeUnitAt(i))) return true;
-  }
-  return false;
-}
-
-/// Preview font size estimate: CJK glyph boxes hug the em box; Latin/digit
-/// boxes only cover cap/x height (~0.72 em). The export path calibrates the
-/// exact size by measuring the created text object, this is display-only.
-double estimateFontSize(String text, List<PdfRect> boxes) {
-  final heights = boxes.map((b) => b.height).where((h) => h > 0).toList()..sort();
-  if (heights.isEmpty) return 12;
-  final median = heights[heights.length ~/ 2];
-  final cjk = text.runes.any(_isCJK);
-  return cjk ? median * 0.98 : median / 0.72;
 }

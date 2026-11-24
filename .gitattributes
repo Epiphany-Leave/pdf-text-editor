@@ -1,0 +1,3 @@
+/android/gradlew text eol=lf
+/test/fixtures/*.pdf binary
+/assets/fonts/OFL.txt -whitespace
