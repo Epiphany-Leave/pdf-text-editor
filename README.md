@@ -4,6 +4,11 @@
 
 Android arm64 APK 与 Windows x64 便携压缩包均已构建，其中 Android APK 为 debug 签名。前往 [发布页面](https://github.com/Epiphany-Leave/pdf-text-editor/releases) 获取安装包。
 
+## 下载与运行
+
+- **Windows x64** 发布为便携版 ZIP 压缩包。请将压缩包内的所有文件完整解压后，双击 `pdf_text_editor.exe` 运行，并保留 `pdf_text_editor.exe` 同级的 DLL 文件与 `data/` 目录。
+- **Android arm64** 提供 APK 安装包。
+
 ## 核心功能
 
 - 打开文字型 PDF 后可直接点击页面文字进行修改
@@ -65,4 +70,6 @@ flutter build windows --release
 
 ## 许可说明
 
-本项目本身尚未指定许可证。Noto Sans SC 字体遵循 SIL OFL 1.1 许可证，详见 [assets/fonts/OFL.txt](assets/fonts/OFL.txt)。
+本项目源代码使用 MIT 许可证（© 2026 Epiphany-Leave），完整条款见仓库根目录的 [LICENSE](LICENSE)。
+
+随附的 Noto Sans SC 字体遵循 SIL OFL 1.1 许可证，许可文件见 [assets/fonts/OFL.txt](assets/fonts/OFL.txt)。
