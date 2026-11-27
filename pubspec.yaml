@@ -2,7 +2,7 @@ name: pdf_text_editor
 description: "PDF 文字修改工具:打开 PDF,点击文字直接修改并导出新文件(Windows / Android)。"
 publish_to: 'none'
 
-version: 1.0.6+7
+version: 1.0.9+10
 
 environment:
   sdk: ^3.14.0

@@ -23,11 +23,16 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  static LRESULT CALLBACK DropWindowProc(HWND hwnd, UINT message, WPARAM wparam,
+                                         LPARAM lparam, UINT_PTR subclass_id,
+                                         DWORD_PTR ref_data);
+
   // The project to run.
   flutter::DartProject project_;
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+  HWND drop_window_ = nullptr;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

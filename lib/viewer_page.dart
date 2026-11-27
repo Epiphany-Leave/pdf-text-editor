@@ -9,6 +9,7 @@ import 'edit_session.dart';
 import 'engine/pdf_edit_engine.dart' show MissingPdfFont;
 import 'engine/runs.dart';
 import 'error_log.dart';
+import 'export_name_dialog.dart';
 import 'pdf_fonts.dart';
 
 class ViewerPage extends StatefulWidget {
@@ -16,11 +17,13 @@ class ViewerPage extends StatefulWidget {
     super.key,
     required this.session,
     required this.filePath,
+    required this.fileName,
     required this.fonts,
   });
 
   final EditSession session;
   final String filePath;
+  final String fileName;
   final PdfFonts fonts;
 
   @override
@@ -33,13 +36,13 @@ class _ViewerPageState extends State<ViewerPage> {
   bool _exporting = false;
   bool _updating = false;
   final _viewerController = PdfViewerController();
+  final _currentPage = ValueNotifier<int>(1);
   Matrix4? _savedView;
   int _savedPage = 1;
 
-  String get _fileName => widget.filePath.split(Platform.pathSeparator).last;
-
   @override
   void dispose() {
+    _currentPage.dispose();
     widget.session.dispose();
     super.dispose();
   }
@@ -52,82 +55,107 @@ class _ViewerPageState extends State<ViewerPage> {
   Future<void> _showEditSheet(TextRun run) async {
     final session = widget.session;
     final existing = session.editForRun(run);
-    final controller = TextEditingController(
-      text: existing?.newText ?? run.text,
-    );
+    var newText = existing?.newText ?? run.text;
     var bold = existing?.bold ?? run.format.bold;
-    final result = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setState) => Padding(
-          padding: EdgeInsets.only(
-            left: 16,
-            right: 16,
-            top: 16,
-            bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                '第 ${run.page} 页原文:',
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-              ),
-              const SizedBox(height: 4),
-              Text(run.text, style: const TextStyle(fontSize: 16)),
-              const Divider(height: 24),
-              TextField(
-                controller: controller,
-                autofocus: true,
-                maxLines: null,
-                style: const TextStyle(fontSize: 18),
-                decoration: const InputDecoration(
-                  labelText: '改为',
-                  border: OutlineInputBorder(),
+    final wide = MediaQuery.sizeOf(context).width >= 720;
+    Widget editPanel(BuildContext context) => StatefulBuilder(
+      builder: (context, setState) {
+        final theme = Theme.of(context);
+        return SafeArea(
+          top: false,
+          child: SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(
+              24,
+              wide ? 24 : 0,
+              24,
+              MediaQuery.viewInsetsOf(context).bottom + 20,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('编辑文字', style: theme.textTheme.titleLarge),
+                const SizedBox(height: 16),
+                Text('第 ${run.page} 页原文', style: theme.textTheme.labelLarge),
+                const SizedBox(height: 6),
+                Text(run.text, style: theme.textTheme.bodyLarge),
+                const SizedBox(height: 16),
+                TextFormField(
+                  initialValue: newText,
+                  autofocus: true,
+                  minLines: 1,
+                  maxLines: 5,
+                  onChanged: (value) => newText = value,
+                  decoration: const InputDecoration(labelText: '改为'),
                 ),
-              ),
-              const SizedBox(height: 8),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('粗体'),
-                value: bold,
-                onChanged: (v) => setState(() => bold = v),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: FilledButton(
-                      onPressed: () => Navigator.pop(context, true),
-                      child: const Text('确定'),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('粗体'),
+                  value: bold,
+                  onChanged: (v) => setState(() => bold = v),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('取消'),
                     ),
-                  ),
-                  if (existing != null) ...[
-                    const SizedBox(width: 12),
-                    OutlinedButton(
-                      onPressed: () {
-                        Navigator.pop(context, false);
-                      },
-                      child: const Text('清除修改'),
+                    if (existing != null)
+                      OutlinedButton(
+                        onPressed: () => Navigator.pop(context, false),
+                        child: const Text('清除修改'),
+                      ),
+                    FilledButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      child: const Text('应用修改'),
                     ),
                   ],
-                  const SizedBox(width: 12),
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('取消'),
-                  ),
-                ],
-              ),
-            ],
+                ),
+              ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
+    final result = wide
+        ? await showGeneralDialog<bool>(
+            context: context,
+            barrierDismissible: true,
+            barrierLabel: '关闭文字编辑',
+            barrierColor: Colors.black26,
+            pageBuilder: (context, _, _) => SafeArea(
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: SizedBox(
+                  width: 380,
+                  height: double.infinity,
+                  child: Material(
+                    color: Theme.of(context).colorScheme.surface,
+                    elevation: 12,
+                    borderRadius: const BorderRadius.horizontal(
+                      left: Radius.circular(20),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: editPanel(context),
+                  ),
+                ),
+              ),
+            ),
+          )
+        : await showModalBottomSheet<bool>(
+            context: context,
+            useSafeArea: true,
+            isScrollControlled: true,
+            showDragHandle: true,
+            builder: editPanel,
+          );
     if (!mounted) return;
     if (result == true) {
-      await _applyChange(() => _editWithFonts(run, controller.text, bold));
+      await _applyChange(() => _editWithFonts(run, newText, bold));
     } else if (result == false && existing != null) {
       await _applyChange(() => session.removeEdit(existing));
     }
@@ -349,6 +377,9 @@ class _ViewerPageState extends State<ViewerPage> {
   }
 
   Future<void> _export() async {
+    if (_exporting || _updating || ModalRoute.isCurrentOf(context) != true) {
+      return;
+    }
     final session = widget.session;
     if (!session.hasEdits) {
       ScaffoldMessenger.of(
@@ -356,17 +387,17 @@ class _ViewerPageState extends State<ViewerPage> {
       ).showSnackBar(const SnackBar(content: Text('还没有修改内容。先点击文档中的文字进行修改。')));
       return;
     }
+    String? fileName = widget.fileName;
+    if (Platform.isAndroid) {
+      fileName = await showExportNameDialog(context, fileName);
+      if (!mounted || fileName == null) return;
+    }
     setState(() => _exporting = true);
     ErrorLog.log('导出开始:${session.editCount} 处修改');
     try {
       final bytes = session.previewBytes;
-      final base = _fileName.replaceAll(
-        RegExp(r'\.pdf$', caseSensitive: false),
-        '',
-      );
-      final suggestion = '$base-已修改.pdf';
       // file_picker 13 的 saveFile 直接收字节并负责写盘(安卓走系统保存界面)
-      final uri = await FilePicker.saveFile(fileName: suggestion, bytes: bytes);
+      final uri = await FilePicker.saveFile(fileName: fileName, bytes: bytes);
       if (uri == null) {
         ErrorLog.log('导出取消(用户关闭保存对话框)');
         return; // 用户取消
@@ -390,28 +421,74 @@ class _ViewerPageState extends State<ViewerPage> {
   @override
   Widget build(BuildContext context) {
     final session = widget.session;
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final wide = MediaQuery.sizeOf(context).width >= 720;
+    final busy = _exporting || _updating;
     return Stack(
       children: [
         Scaffold(
           appBar: AppBar(
-            title: Text(_fileName, overflow: TextOverflow.ellipsis),
-            actions: [
-              IconButton(
-                icon: Badge(
-                  isLabelVisible: session.editCount > 0,
-                  label: Text('${session.editCount}'),
-                  child: const Icon(Icons.list_alt),
+            toolbarHeight: MediaQuery.textScalerOf(context)
+                .scale(56)
+                .clamp(56.0, 96.0),
+            titleSpacing: 4,
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(widget.fileName, overflow: TextOverflow.ellipsis),
+                ValueListenableBuilder<int>(
+                  valueListenable: _currentPage,
+                  builder: (context, page, _) => Text(
+                    '$page / ${session.document.pages.length} 页',
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
                 ),
-                tooltip: '修改记录',
-                onPressed: _showChanges,
+              ],
+            ),
+            actions: [
+              ListenableBuilder(
+                listenable: session,
+                builder: (context, _) {
+                  final icon = Badge(
+                    isLabelVisible: session.hasEdits,
+                    label: Text('${session.editCount}'),
+                    backgroundColor: colors.tertiaryContainer,
+                    textColor: colors.onTertiaryContainer,
+                    child: const Icon(Icons.list_alt_outlined),
+                  );
+                  return wide
+                      ? TextButton.icon(
+                          icon: icon,
+                          label: const Text('修改记录'),
+                          onPressed: busy ? null : _showChanges,
+                        )
+                      : IconButton(
+                          icon: icon,
+                          tooltip: '修改记录',
+                          onPressed: busy ? null : _showChanges,
+                        );
+                },
               ),
               Padding(
-                padding: const EdgeInsets.only(right: 12),
-                child: FilledButton.icon(
-                  onPressed: _export,
-                  icon: const Icon(Icons.save_outlined),
-                  label: const Text('导出'),
+                padding: EdgeInsets.only(
+                  left: wide ? 8 : 0,
+                  right: wide ? 20 : 12,
                 ),
+                child: wide
+                    ? FilledButton.icon(
+                        onPressed: busy ? null : _export,
+                        icon: const Icon(Icons.download_outlined),
+                        label: const Text('导出 PDF'),
+                      )
+                    : IconButton.filled(
+                        onPressed: busy ? null : _export,
+                        icon: const Icon(Icons.download_outlined),
+                        tooltip: '导出 PDF',
+                      ),
               ),
             ],
           ),
@@ -426,6 +503,18 @@ class _ViewerPageState extends State<ViewerPage> {
               controller: _viewerController,
               initialPageNumber: _savedPage,
               params: PdfViewerParams(
+                backgroundColor: colors.surfaceContainer,
+                pageDropShadow: const BoxShadow(
+                  color: Color(0x300e1927),
+                  blurRadius: 12,
+                  offset: Offset(0, 3),
+                ),
+                onPageChanged: (page) {
+                  if (page == null) return;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) _currentPage.value = page;
+                  });
+                },
                 onViewerReady: (document, controller) {
                   final saved = _savedView;
                   if (saved != null) {
@@ -449,9 +538,8 @@ class _ViewerPageState extends State<ViewerPage> {
             ),
           ),
         ),
-        if (_exporting || _updating)
-          const ModalBarrier(color: Colors.black54, dismissible: false),
-        if (_exporting || _updating)
+        if (busy) const ModalBarrier(color: Colors.black26, dismissible: false),
+        if (busy)
           Center(
             child: Card(
               child: Padding(
@@ -556,6 +644,7 @@ class _PageOverlayState extends State<_PageOverlay> {
                 pageHeight: widget.page.height,
                 scale: constraints.biggest.width / widget.page.width,
                 revision: widget.session.previewRevision,
+                color: Theme.of(context).colorScheme.tertiary,
               ),
               child: const SizedBox.expand(),
             ),
@@ -573,6 +662,7 @@ class _EditsPainter extends CustomPainter {
     required this.pageHeight,
     required this.scale,
     required this.revision,
+    required this.color,
   });
 
   final EditSession session;
@@ -580,13 +670,14 @@ class _EditsPainter extends CustomPainter {
   final double pageHeight; // in PDF points
   final double scale;
   final int revision;
+  final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
     final edits = session.editsForPage(pageNumber);
     if (edits.isEmpty) return;
     final border = Paint()
-      ..color = Colors.blue.withValues(alpha: 0.7)
+      ..color = color.withValues(alpha: 0.8)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.0;
     for (final edit in edits) {
@@ -607,5 +698,6 @@ class _EditsPainter extends CustomPainter {
       old.session != session ||
       old.pageNumber != pageNumber ||
       old.revision != revision ||
+      old.color != color ||
       old.scale != scale;
 }

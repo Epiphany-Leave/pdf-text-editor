@@ -1,21 +1,23 @@
 # PDF 文字修改工具
 
-一款基于 Flutter 与 PDFium 构建的跨平台文字型 PDF 本地修改工具（当前版本 v1.0.6），使用 `pdfrx` 渲染页面并通过 FFI 实现底层编辑。
+一款基于 Flutter 与 PDFium 构建的跨平台文字型 PDF 本地修改工具，使用 `pdfrx` 渲染页面并通过 FFI 实现底层编辑。
 
-Android arm64 APK 与 Windows x64 便携压缩包均已构建，其中 Android APK 为 debug 签名。前往 [发布页面](https://github.com/Epiphany-Leave/pdf-text-editor/releases) 获取安装包。
+[v1.0.9 发布页](https://github.com/Epiphany-Leave/pdf-text-editor/releases/tag/v1.0.9) 提供 Android arm64 APK 与 Windows x64 便携版。
 
 ## 下载与运行
 
-- **Windows x64** 发布为便携版 ZIP 压缩包。请将压缩包内的所有文件完整解压后，双击 `pdf_text_editor.exe` 运行，并保留 `pdf_text_editor.exe` 同级的 DLL 文件与 `data/` 目录。
-- **Android arm64** 提供 APK 安装包。
+- **Windows x64** 下载 [pdf_text_editor-Windows-v1.0.9-x64.zip](https://github.com/Epiphany-Leave/pdf-text-editor/releases/download/v1.0.9/pdf_text_editor-Windows-v1.0.9-x64.zip)。请将压缩包内的所有文件完整解压后，双击 `pdf_text_editor.exe` 运行，并保留 `pdf_text_editor.exe` 同级的 DLL 文件与 `data/` 目录。
+- **Android arm64** 下载 [pdf_text_editor-Android-v1.0.9-arm64.apk](https://github.com/Epiphany-Leave/pdf-text-editor/releases/download/v1.0.9/pdf_text_editor-Android-v1.0.9-arm64.apk)。本版沿用原有 debug 签名，已安装 v1.0.6、v1.0.7 或 v1.0.8 的用户可直接覆盖更新。
 
 ## 核心功能
 
 - 打开文字型 PDF 后可直接点击页面文字进行修改
+- Windows 可从资源管理器把 PDF 拖入首页或编辑窗口。已有文档时，新文件会另开一页，返回可继续编辑原文档。
+- Android 与 Windows 共用新版首页与阅读界面。宽屏采用右侧编辑面板，窄屏采用可滚动的底部编辑面板。
 - 尽量保留原字号、颜色、粗体、文字矩阵与基线，优先复用原文档字体
 - 修改文字宽度变化时，同行紧邻的后文自动让位
 - 支持修改预览与撤销操作
-- 默认使用新文件名导出，保存位置由用户选择
+- 导出默认使用原文件名。安卓会选中文件名主体，输入即可改名。`.pdf` 后缀固定，改好后再选择保存位置。同目录重名时，安卓可能加数字区分，Windows 会在覆盖前询问。
 
 ## 字体管理
 
@@ -43,9 +45,11 @@ Android 与 Windows 均支持以下字体匹配与管理方式。
 
 ## 测试状态
 
-本次发布的手机与桌面界面仍需手测，早期版本已有测试。当前自动化测试完整套件 33 项通过，Windows 字体专项 4 项通过。
+v1.0.9 的 38 项 `flutter test` 自动化测试全部通过，覆盖文字编辑、格式保留、拖拽打开和导出文件名等流程。手机和桌面上的实际操作仍需手测。
 
 ## 构建环境
+
+Android 和 Windows 共用 `pubspec.yaml` 中的版本号。
 
 - Flutter `3.50.1`
 - Dart SDK `^3.14.0`
